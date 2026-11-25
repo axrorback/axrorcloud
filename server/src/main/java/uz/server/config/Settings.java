@@ -116,7 +116,7 @@ public class Settings {
                         <h1>Connection Timeout after 60 seconds</h1>
                         <p>It seems the connection to the local service has timed out.</p>
                         <p>Please check your network settings or try again later.</p>
-                        <a href="https://axror.tech" class="btn-action">Go to axrorcloud</a>
+                        <a href="https://axror.cloud" class="btn-action">Go to axrorcloud</a>
                     </div>
                 </div>
             </body>
@@ -238,7 +238,7 @@ public class Settings {
                         <h1>Application Not Running</h1>
                         <p>It seems the local application you're trying to access is currently not running.</p>
                         <p>Please check your local server status or contact support if the issue persists.</p>
-                        <a href="https://axror.tech" class="btn-action">Go to axrorcloud</a>
+                        <a href="https://axror.cloud" class="btn-action">Go to axrorcloud</a>
                     </div>
                 </div>
             </body>
@@ -365,7 +365,7 @@ public class Settings {
                         <h1>Tunnel Not Found</h1>
                         <p>It seems the tunnel you're trying to access does not exist or is currently unavailable.</p>
                         <p>Please verify the tunnel subdomain or contact support for assistance.</p>
-                        <a href="https://axror.tech" class="btn-action">Go to axrorcloud</a>
+                        <a href="https://axror.cloud" class="btn-action">Go to axrorcloud</a>
                     </div>
                 </div>
             </body>
