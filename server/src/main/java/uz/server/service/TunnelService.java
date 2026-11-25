@@ -1,0 +1,82 @@
+package uz.server.service;
+
+import java.security.SecureRandom;
+import java.util.Objects;
+import java.util.Optional;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import uz.server.config.Settings;
+import uz.server.domain.entity.Tunnel;
+import uz.server.domain.entity.User;
+import uz.server.domain.exception.BaseException;
+import uz.server.repository.TunnelRepository;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class TunnelService {
+    private final TunnelRepository repo;
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final String CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+    public String create(String sessionId, User user, String customSubdomain) {
+        log.info("Creating tunnel: userId={}", user.getId());
+        Integer count = repo.countByUser(user);
+
+        if (count == 3){
+            log.error("User can't create more than 3 tunnels: userId={}", user.getId());
+            throw new BaseException("You can't create more than 3 tunnels!");
+        }
+
+        if (customSubdomain != null && repo.existsBySubdomain(customSubdomain)){
+            log.error("Subdomain already exists: subdomain={}", customSubdomain);
+            throw new BaseException("Subdomain already exists!");
+        }
+
+        Tunnel save = repo.save(Tunnel.builder()
+                .sessionId(sessionId)
+                .subdomain(Objects.requireNonNullElse(customSubdomain, generateUniqueString()))
+                .user(user)
+                .build());
+
+        log.info("Tunnel created: subdomain={}", save.getSubdomain());
+
+        return save.getSubdomain();
+    }
+
+    private String generateUniqueString() {
+      StringBuilder sb = new StringBuilder();
+
+      for (int i = 0; i < 8; i++) {
+        sb.append(CHARACTERS.charAt(RANDOM.nextInt(CHARACTERS.length())));
+      }
+
+      return sb.toString();
+    }
+
+    public void deactivate(Long tunnelId) {
+        log.info("Deactivating tunnel: tunnelId={}", tunnelId);
+        Optional<Tunnel> tunnel = repo.findById(tunnelId);
+
+        if (tunnel.isEmpty()){
+            log.error("Tunnel not found: tunnelId={}", tunnelId);
+            throw new BaseException("Tunnel not found!");
+        }
+
+        log.info("Tunnel deactivated and deleting: tunnelId={}", tunnelId);
+
+        repo.deleteById(tunnelId);
+    }
+
+    public Tunnel getTunnelBySubdomain(String subdomain) {
+        log.info("Getting tunnel by subdomain: subdomain={}", subdomain);
+        return repo.findBySubdomainIgnoreCase(subdomain).orElseThrow(() -> new BaseException(Settings.TUNNEL_NOT_FOUND_HTML));
+    }
+
+    public Tunnel getTunnelBySessionId(String id) {
+        log.info("Getting tunnel by sessionId: sessionId={}", id);
+        return repo.findBySessionId(id).orElseThrow(() -> new BaseException(Settings.TUNNEL_NOT_FOUND_HTML));
+    }
+}
