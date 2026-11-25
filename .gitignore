@@ -1,0 +1,18 @@
+# Project exclude paths
+/server/build/
+/server/target
+# Maven Wrapper fayllari
+/server/.mvn/
+/server/mvnw
+/server/mvnw.cmd
+
+.idea/
+
+# Project exclude paths
+/out/
+
+# Nix
+result
+
+# Direnv
+.direnv
