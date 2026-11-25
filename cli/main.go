@@ -1,0 +1,517 @@
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+const (
+	wsDomain   = "wss://axror.cloud/server"
+	httpDomain = "https://axror.cloud"
+	version    = "AxrorCloud CLI v1.0.0"
+)
+
+type RequestType string
+
+type ResponseType string
+
+const (
+	Forward RequestType = "FORWARD"
+	Created RequestType = "CREATED"
+)
+
+const (
+	NotRunningAppOfClient ResponseType = "NOT_RUNNING_APP_OF_CLIENT"
+	ResponseChunk         ResponseType = "RESPONSE_CHUNK"
+	ResponseChunkBase64   ResponseType = "RESPONSE_CHUNK_BASE64"
+)
+
+type ForwardInfo struct {
+	Path    string            `json:"path"`
+	Method  string            `json:"method"`
+	Body    string            `json:"body,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+type TunnelInfo struct {
+	Message string `json:"message"`
+}
+
+type Response struct {
+	ID           string            `json:"requestId"`
+	StatusCode   int               `json:"status"`
+	Body         string            `json:"body"`
+	Last         bool              `json:"last"`
+	ResponseType ResponseType      `json:"responseType"`
+	Headers      map[string]string `json:"headers"`
+}
+
+type Request struct {
+	ID          string       `json:"id"`
+	Type        RequestType  `json:"type"`
+	ForwardInfo *ForwardInfo `json:"forwardInfo,omitempty"`
+	TunnelInfo  *TunnelInfo  `json:"tunnelInfo,omitempty"`
+	Error       string       `json:"error,omitempty"`
+}
+
+type WebSocketManager struct {
+	conn      *websocket.Conn
+	writeChan chan []byte
+	closeChan chan struct{}
+	wg        sync.WaitGroup
+	mu        sync.Mutex
+}
+
+func NewWebSocketManager(conn *websocket.Conn) *WebSocketManager {
+	wsm := &WebSocketManager{
+		conn:      conn,
+		writeChan: make(chan []byte, 500),
+		closeChan: make(chan struct{}),
+	}
+
+	wsm.wg.Add(1)
+	go wsm.writerLoop()
+
+	return wsm
+}
+
+func (wsm *WebSocketManager) writerLoop() {
+	defer wsm.wg.Done()
+
+	for {
+		select {
+		case message := <-wsm.writeChan:
+			wsm.mu.Lock()
+			err := wsm.conn.WriteMessage(websocket.TextMessage, message)
+			wsm.mu.Unlock()
+			if err != nil {
+				printError("WebSocket error: " + err.Error())
+				return
+			}
+		case <-wsm.closeChan:
+			return
+		}
+	}
+}
+
+func (wsm *WebSocketManager) Write(message []byte) {
+	select {
+	case wsm.writeChan <- message:
+	case <-wsm.closeChan:
+	}
+}
+
+func (wsm *WebSocketManager) WritePing() error {
+	wsm.mu.Lock()
+	defer wsm.mu.Unlock()
+	return wsm.conn.WriteMessage(websocket.PingMessage, []byte("ping"))
+}
+
+func (wsm *WebSocketManager) WriteClose(closeCode int, text string) error {
+	wsm.mu.Lock()
+	defer wsm.mu.Unlock()
+	return wsm.conn.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(closeCode, text))
+}
+
+func (wsm *WebSocketManager) Close() {
+	close(wsm.closeChan)
+	wsm.wg.Wait()
+}
+
+func main() {
+	portFlag := flag.String("port", "", "Local port to forward requests")
+	authFlag := flag.String("auth", "", "Authentication token")
+	helpFlag := flag.Bool("help", false, "Show help information")
+	versionFlag := flag.Bool("version", false, "Show version information")
+	customSubdomainFlag := flag.String("sd", "", "Custom subdomain for the tunnel")
+
+	flag.Parse()
+
+	if *helpFlag {
+		printHelp()
+		return
+	}
+
+	if *versionFlag {
+		fmt.Println(version)
+		return
+	}
+
+	// Handle commands
+	if *authFlag != "" {
+		authorize(*authFlag)
+	} else if *portFlag != "" {
+		createTunnel(*portFlag, *customSubdomainFlag)
+	} else {
+		printError("Command not recognized.")
+		printHelp()
+	}
+}
+
+func printHelp() {
+	fmt.Println("AxrorCloud CLI - A lightweight tunneling tool")
+	fmt.Println("Usage:")
+	fmt.Println("  axrorcloud [options]")
+	fmt.Println("\nOptions:")
+	fmt.Println("  --port <port>    Local port to forward requests")
+	fmt.Println("  --auth <token>   Authentication token")
+	fmt.Println("  --help           Show help information")
+	fmt.Println("  --version        Show version information")
+	fmt.Println("  --sd <subdomain> Custom subdomain for the tunnel")
+}
+
+func printAxrorCloud() {
+	logo := `
+                                       _                 _
+                                      | |               | |
+  __ _ __  __ _ __  ___  _ __   ___   | |  ___  _   _  __| |
+ / _' |\ \/ /| '__|/ _ \| '__| / __|  | | / _ \| | | |/ _' |
+| (_| | >  < | |  | (_) | |   | (__   | || (_) | |_| | (_| |
+ \__,_|/_/\_\|_|   \___/|_|    \___|  |_| \___/ \__,_|\__,_|
+`
+	fmt.Println(logo)
+}
+
+func authorize(auth string) {
+	reqBody := map[string]string{"token": auth}
+
+	jsonData, err := json.Marshal(reqBody)
+
+	if err != nil {
+		printError("Failed to create request body: " + err.Error())
+		return
+	}
+
+	resp, err := http.Post(httpDomain+"/auth", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		printError("Failed to connect to server: " + err.Error())
+		return
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			printError("Failed to get home directory: " + err.Error())
+			return
+		}
+
+		tokenDir := filepath.Join(homeDir, ".axrorcloud")
+		err = os.MkdirAll(tokenDir, 0755)
+		if err != nil {
+			printError("Failed to create directory: " + err.Error())
+			return
+		}
+
+		tokenPath := filepath.Join(tokenDir, "token")
+		err = os.WriteFile(tokenPath, []byte(auth), 0600)
+		if err != nil {
+			printError("Failed to save token: " + err.Error())
+			return
+		}
+
+		printSuccess("Successfully authenticated and token saved.")
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		printError("Authentication failed. Server response: " + string(body))
+	}
+}
+
+func createTunnel(port string, customSubdomain string) {
+	printAxrorCloud()
+	printInfo("Attempting to establish a tunnel...")
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		printError("Failed to get home directory: " + err.Error())
+		return
+	}
+
+	tokenPath := filepath.Join(homeDir, ".axrorcloud", "token")
+	tokenBytes, err := os.ReadFile(tokenPath)
+	if err != nil {
+		printError("Authentication token is missing. Please authenticate first.")
+		return
+	}
+
+	token := strings.TrimSpace(string(tokenBytes))
+
+	header := http.Header{}
+	header.Add("Authorization", "Bearer "+token)
+
+	validSubdomain := regexp.MustCompile(`^[a-zA-Z0-9]+$`)
+	if customSubdomain != "" {
+		if len(customSubdomain) > 63 {
+			printError("Subdomain is too long. Max length is 63 characters.")
+			return
+		}
+
+		if !validSubdomain.MatchString(customSubdomain) {
+			printError("Invalid subdomain format. Only alphanumeric characters are allowed.")
+			return
+		}
+		header.Add("Custom-Subdomain", customSubdomain)
+	}
+
+	dialer := websocket.Dialer{
+		ReadBufferSize:   10 * 1024 * 1024, // 10MB
+		WriteBufferSize:  10 * 1024 * 1024, // 10MB
+		HandshakeTimeout: 45 * time.Second,
+	}
+
+	c, _, err := dialer.Dial(wsDomain, header)
+	if err != nil {
+		printError("Error connecting to the server: " + err.Error())
+		return
+	}
+
+	wsManager := NewWebSocketManager(c)
+
+	defer func() {
+		wsManager.Close()
+		c.Close()
+	}()
+
+	printWarning("The tunnel will automatically close in 4 hours.")
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for {
+			_, message, err := c.ReadMessage()
+
+			if err != nil {
+				return
+			}
+
+			var request Request
+			if err := json.Unmarshal(message, &request); err != nil {
+				printError("Failed to parse message: " + err.Error())
+				continue
+			}
+
+			switch request.Type {
+			case Forward:
+				{
+					if request.ForwardInfo != nil {
+						go requestSender(&request, wsManager, port)
+					} else {
+						printError("Invalid forward request: forwardInfo is missing.")
+					}
+				}
+			case Created:
+				{
+					if request.TunnelInfo != nil {
+						printInfo("Tunnel created: " + request.TunnelInfo.Message + " -> " + "http://127.0.0.1:" + port)
+					}
+				}
+			default:
+				{
+					if request.Error != "" {
+						printError("Error from server: " + request.Error)
+					}
+				}
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			err := wsManager.WritePing()
+			if err != nil {
+				printError("Failed to send ping: " + err.Error())
+				return
+			}
+		case <-interrupt:
+			printWarning("AxrorCloud is off, thank you for using")
+
+			err := wsManager.WriteClose(websocket.CloseNormalClosure, "")
+			if err != nil {
+				printError("Error during closing websocket: " + err.Error())
+				return
+			}
+
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+			}
+			return
+		case <-time.After(4 * time.Hour):
+			printWarning("Tunnel timeout reached (4 hours). Closing connection.")
+			return
+		}
+	}
+}
+
+func requestSender(request *Request, wsManager *WebSocketManager, localPort string) {
+	forwardInfo := request.ForwardInfo
+	targetURL := fmt.Sprintf("http://127.0.0.1:%s%s", localPort, forwardInfo.Path)
+
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+	}
+	var reqBody io.Reader
+
+	if forwardInfo.Body != "" {
+		reqBody = strings.NewReader(forwardInfo.Body)
+	}
+
+	req, err := http.NewRequest(forwardInfo.Method, targetURL, reqBody)
+	if err != nil {
+		printError("Error creating request: " + err.Error())
+		return
+	}
+
+	req.Header.Set("User-Agent", "Go HttpClient Bot")
+	req.Header.Set("Accept", "*/*")
+
+	for k, v := range forwardInfo.Headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+
+	if err != nil {
+		if strings.Contains(err.Error(), "connection refused") {
+			printError(fmt.Sprintf("Connection refused. Make sure the local server is running on port %s", localPort))
+		} else {
+			printError("Error sending request: " + err.Error())
+		}
+
+		response := Response{
+			ID:           request.ID,
+			StatusCode:   500,
+			Body:         "",
+			Last:         false,
+			ResponseType: NotRunningAppOfClient,
+		}
+
+		responseJSON, err := json.Marshal(response)
+
+		if err != nil {
+			printError("Error marshaling response: " + err.Error())
+			return
+		}
+
+		wsManager.Write(responseJSON)
+		return
+	}
+
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		printError("Error reading response body: " + err.Error())
+		return
+	}
+
+	responseBody := base64.StdEncoding.EncodeToString(bodyBytes)
+
+	currentTime := time.Now().Format("15:04:05")
+	fmt.Println(fmt.Sprintf("[%s] %s %d %s", currentTime, forwardInfo.Method, resp.StatusCode, forwardInfo.Path))
+
+	const chunkSize = 10000000
+
+	if len(responseBody) > chunkSize {
+		for len(responseBody) > 0 {
+			end := chunkSize
+			last := false
+
+			if len(responseBody) <= chunkSize {
+				end = len(responseBody)
+				last = true
+			}
+
+			chunk := responseBody[:end]
+			responseBody = responseBody[end:]
+
+			response := Response{
+				ID:           request.ID,
+				StatusCode:   resp.StatusCode,
+				Body:         chunk,
+				Last:         last,
+				ResponseType: ResponseChunkBase64,
+				Headers:      flattenHeaders(resp.Header),
+			}
+
+			responseJSON, err := json.Marshal(response)
+			if err != nil {
+				printError("Error marshaling response: " + err.Error())
+				return
+			}
+
+			wsManager.Write(responseJSON)
+		}
+	} else {
+		response := Response{
+			ID:           request.ID,
+			StatusCode:   resp.StatusCode,
+			Body:         responseBody,
+			Last:         true,
+			ResponseType: ResponseChunkBase64,
+			Headers:      flattenHeaders(resp.Header),
+		}
+
+		responseJSON, err := json.Marshal(response)
+
+		if err != nil {
+			printError("Error marshaling response: " + err.Error())
+			return
+		}
+
+		wsManager.Write(responseJSON)
+	}
+}
+
+func flattenHeaders(h http.Header) map[string]string {
+	flat := make(map[string]string)
+	for key, values := range h {
+		if len(values) > 0 {
+			flat[key] = values[0]
+		}
+	}
+	return flat
+}
+
+func printError(msg string) {
+	fmt.Println("[ERROR] " + msg)
+}
+
+func printInfo(msg string) {
+	fmt.Println("[INFO] " + msg)
+}
+
+func printSuccess(msg string) {
+	fmt.Println("[SUCCESS] " + msg)
+}
+
+func printWarning(msg string) {
+	fmt.Println("[WARNING] " + msg)
+}
