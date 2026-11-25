@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: server
+  datasource:
+    driver-class-name: org.postgresql.Driver
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        format_sql: true
+    show-sql: true
+server:
+  tomcat:
+    max-http-form-post-size: 100MB
+    max-swallow-size: 100MB
+management:
+  endpoint:
+    health:
+      show-details: always
+  endpoints:
+    web:
+      exposure:
+        include:
+          - prometheus
