@@ -11,8 +11,6 @@
 <p align="center">
   <a href="https://axror.cloud"><img src="https://img.shields.io/badge/Website-axror.cloud-0ea5e9?style=for-the-badge" alt="Website" /></a>
   <a href="https://github.com/axrorback/axrorcloud/releases"><img src="https://img.shields.io/badge/Release-v1.0.0-22c55e?style=for-the-badge" alt="Release" /></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-6366f1?style=for-the-badge" alt="License" /></a>
-</p>
 
 ---
 
